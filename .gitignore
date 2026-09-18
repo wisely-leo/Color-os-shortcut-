@@ -1,0 +1,23 @@
+# 构建产物
+build/
+.gradle/
+*.apk
+*.aab
+*.ap_
+*.dex
+*.class
+
+# jar：默认忽略，但保留构建必需的 libxposed API
+*.jar
+!libs/libxposed-api-102.jar
+
+# 本地配置
+local.properties
+.idea/
+*.iml
+.DS_Store
+
+# 签名文件（切勿上传！）
+*.jks
+*.keystore
+*.p12
