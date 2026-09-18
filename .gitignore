@@ -2,21 +2,17 @@
 /build/
 .gradle/
 *.apk
-!template/*.apk
 *.aab
 *.ap_
 *.dex
 *.class
 
-# jar：默认忽略，但保留构建必需的 jar
+# jar：默认忽略，但保留编译依赖
 *.jar
-!libs/*.jar
+!libs/libxposed-api-102.jar
+
 # 本地配置
 local.properties
 .idea/
 *.iml
 .DS_Store
-
-# 构建工作目录
-tools/**/__pycache__/
-*.pyc

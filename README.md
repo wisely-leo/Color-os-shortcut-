@@ -45,53 +45,13 @@
 
 ```
 Color-os-shortcut-/
-├── build.sh                          # 一键构建脚本
-├── libs/                             # 构建依赖 jar
-│   ├── libxposed-api-102.jar
-│   ├── r8.jar
-│   ├── apksig.jar
-│   ├── bcpkix-jdk18on-1.78.1.jar
-│   └── bcprov-jdk18on-1.78.1.jar
-├── template/
-│   └── TaskviewIconBlur_v70c9.apk    # 打包用最小模板 APK
-├── tools/
-│   ├── stub/                         # 编译用 android / libxposed stub
-│   ├── build/                        # 打包脚本（写 xposed 元数据 / 改包名 / 版本）
-│   └── signer/                       # 签名工具（SignApk / VerifyApk / debug.keystore）
 ├── assets/icons/                     # 应用图标（各密度）
+├── libs/
+│   └── libxposed-api-102.jar         # 编译依赖（LSPosed API 102）
 └── src/main/java/com/shortcutblur/
     ├── ShortcutBlurModule.java       # 模块主源码
     └── SBLog.java                    # 可选探针日志（默认关闭）
 ```
-
-## 🔧 编译
-
-### 一键构建（推荐）
-
-仓库已自包含全部构建依赖，只需 **JDK 8+**、**python3**、**java** 即可：
-
-```bash
-bash build.sh
-```
-
-产物：`build/ShortcutBlur_v17.apk`（已签名）。
-
-可用环境变量定制：
-
-```bash
-MODULE_VER=18 APP_LABEL="ShortcutBlur" bash build.sh
-```
-
-### 构建流程说明
-
-`build.sh` 依次完成：
-
-1. 编译 `tools/stub/`（android + libxposed stub）
-2. 编译 `src/main/java/`（模块源码）
-3. `d8` 转 `classes.dex`
-4. 用 `template/` 的模板 APK，改包名、写 `META-INF/xposed/*` 元数据
-5. 改 `AndroidManifest.xml` 的版本号与名称，并做 `resources.arsc` 4 字节对齐
-6. 用 `tools/signer/` 签名并验证
 
 ## 📝 探针日志（可选）
 
