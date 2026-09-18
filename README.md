@@ -9,8 +9,6 @@
 ## ✨ 功能
 
 - 快捷菜单弹出时，背景以**动态模糊**渐进淡入，替代原生静态模糊
-- 图标**清晰入场**，模糊延迟 120ms 后叠加，无「图标被清空后再淡入」的空窗感
-- 关闭时模糊平滑归零
 
 ## 📱 支持环境
 | 项目 | 要求 |
@@ -36,7 +34,6 @@
 |---|---|
 | 包名 | `com.shortcutblur` |
 | 模块入口 | `com.shortcutblur.ShortcutBlurModule` |
-| 版本 | v17 |
 
 ## 📁 目录结构
 
@@ -45,7 +42,7 @@ Color-os-shortcut-/
 ├── libs/
 │   └── libxposed-api-102.jar               # 编译依赖（LSPosed API 102）
 └── src/main/java/com/shortcutblur/
-    └── ShortcutBlurModule.java             # 模块源码（无注释版）
+    └── ShortcutBlurModule.java             
 ```
 
 ## 🔧 编译
@@ -74,7 +71,7 @@ javac -encoding UTF-8 -source 8 -target 8 \
 - Hook 桌面 `OplusPopupContainerWithArrow` 的入场 / 退场动画创建入口
   （`onCreateOpenAnimation` / `onCreateCloseAnimation`），
   把「模糊 0→1 / 1→0」的动画直接 `set.play(...)` 并进原生 `AnimatorSet`，
-  与原生 alpha / scale 动画**同一 start、同一时长、同一帧**，绝对同步、零错位。
+  与原生 alpha / scale 动画。
 - 模糊由 `RenderEffect.createBlurEffect(80f, ...)` 实现：
   优先调用 `com.oplus.view.OplusViewBackgroundRenderEffect.setBackgroundRenderEffect(effect, view)`，
   失败则回退标准 `View.setRenderEffect(effect)`。
