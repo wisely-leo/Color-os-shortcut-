@@ -45,7 +45,6 @@ public class ShortcutBlurModule extends XposedModule {
     }
 
     private static boolean isTargetLauncher(String p) {
-        // 仅支持 ColorOS / OPPO 系统桌面（其内部会复用 AOSP launcher3 的能力）
         return "com.android.launcher".equals(p)
                 || "com.oplus.launcher".equals(p)
                 || "com.coloros.launcher".equals(p);
