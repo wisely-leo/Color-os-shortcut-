@@ -2,6 +2,7 @@
 build/
 .gradle/
 *.apk
+!template/*.apk
 *.aab
 *.ap_
 *.dex
