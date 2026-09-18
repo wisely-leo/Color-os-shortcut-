@@ -34,6 +34,7 @@ public class ShortcutBlurModule extends XposedModule {
         try {
             if (param == null || installed) return;
             String pkg = param.getPackageName();
+            SBLog.i("onPackageReady pkg=" + pkg);
             if (!isTargetLauncher(pkg)) return;
             ClassLoader loader = param.getClassLoader();
             if (loader == null) return;
@@ -41,6 +42,7 @@ public class ShortcutBlurModule extends XposedModule {
             installHooks(loader);
             installed = true;
         } catch (Throwable t) {
+            SBLog.e("READY", "onPackageReady failed", t);
         }
     }
 
@@ -52,23 +54,27 @@ public class ShortcutBlurModule extends XposedModule {
 
     private void installHooks(ClassLoader loader) {
         try {
+            int nFinish;
+            int nAnim = 0;
             Class<?> cls = Class.forName(CLS_POPUP_BLUR_VIEW, false, loader);
-hookReturnView(cls, M_GET_POP_BLUR_VIEW, "pbv");
+            int nReturn = hookReturnView(cls, M_GET_POP_BLUR_VIEW, "pbv");
             try {
                 Class<?> comp = Class.forName(CLS_POPUP_BLUR_VIEW + "$Companion", false, loader);
-                hookReturnView(comp, M_GET_POP_BLUR_VIEW, "pbv_companion");
+                nReturn += hookReturnView(comp, M_GET_POP_BLUR_VIEW, "pbv_companion");
             } catch (Throwable ignore) {}
 
-            hookFinish(cls);
+            nFinish = hookFinish(cls);
 
             for (String cn : new String[]{CLS_OPLUS_POPUP, CLS_ARROW_POPUP, CLS_POPUP_BLUR_VIEW}) {
                 try {
                     Class<?> ac = Class.forName(cn, false, loader);
-hookOpenCloseAnim(ac, "onCreateOpenAnimation", true);
-hookOpenCloseAnim(ac, "onCreateCloseAnimation", false);
+                    nAnim += hookOpenCloseAnim(ac, "onCreateOpenAnimation", true);
+                    nAnim += hookOpenCloseAnim(ac, "onCreateCloseAnimation", false);
                 } catch (Throwable ignore) {}
             }
+            SBLog.d("INSTALL", "hooks return=" + nReturn + " finish=" + nFinish + " anim=" + nAnim);
         } catch (Throwable t) {
+            SBLog.e("INSTALL", "installHooks failed", t);
         }
     }
 
@@ -197,7 +203,7 @@ hookOpenCloseAnim(ac, "onCreateCloseAnimation", false);
         if (view == null) return;
 
         try {
-
+            SBLog.d("LIVE", "makeBlurLive id=" + mid);
             clearStaticLayers(view);
 
             final View fv = view;
@@ -209,6 +215,7 @@ hookOpenCloseAnim(ac, "onCreateCloseAnimation", false);
                             Thread.sleep(120L);
                             applyIconBlur(fv);
                         } catch (Throwable t) {
+                            SBLog.e("ICONBLUR", "delayed apply failed", t);
                         }
                     }
                 }).start();
@@ -223,29 +230,36 @@ hookOpenCloseAnim(ac, "onCreateCloseAnimation", false);
                         try {
                             Thread.sleep(500L);
                             Object launcher = getLauncherQuietly(fv);
-                            if (launcher == null) return;
+                            if (launcher == null) {
+                                SBLog.d("DEPTH", "launcher null, skip retry");
+                                return;
+                            }
                             Object dc = invokeNoArgQuietly(launcher, "getDepthController");
-                            if (dc == null) return;
+                            if (dc == null) {
+                                SBLog.d("DEPTH", "depthController null");
+                                return;
+                            }
                             Object g = invokeNoArgQuietly(dc, "getCurrentBlur");
                             float v = (g instanceof Float) ? (Float) g : -1f;
+                            SBLog.d("DEPTH", "currentBlur=" + v);
                             if (v <= 0.05f) {
-                                setDepthBlur(fv, 1.0f);
-                            } else {
+                                boolean ok = setDepthBlur(fv, 1.0f);
+                                SBLog.d("DEPTH", "fallback setBlur=1 ok=" + ok);
                             }
                         } catch (Throwable t) {
+                            SBLog.e("DEPTH", "retry thread failed", t);
                         }
                     }
                 }).start();
             } catch (Throwable ignore) {}
 
         } catch (Throwable t) {
+            SBLog.e("LIVE", "makeBlurLive failed", t);
         }
     }
 
     private void applyIconBlur(View view) {
-        final String suffix = ".iconBlur";
         try {
-
             Object effect = android.graphics.RenderEffect.createBlurEffect(
                     80.0f, 80.0f, android.graphics.Shader.TileMode.MIRROR);
 
@@ -258,48 +272,57 @@ hookOpenCloseAnim(ac, "onCreateCloseAnimation", false);
                 m.invoke(null, effect, view);
                 oplusOk = true;
             } catch (Throwable t) {
+                SBLog.d("ICONBLUR", "oplus path failed: " + t);
             }
 
             if (!oplusOk) {
                 String err = tryViewSetRenderEffect(view);
+                SBLog.d("ICONBLUR", "fallback setRenderEffect err=" + err);
+            } else {
+                SBLog.d("ICONBLUR", "oplus path ok");
             }
         } catch (Throwable t) {
+            SBLog.e("ICONBLUR", "applyIconBlur failed", t);
         }
     }
 
     private void clearIconBlur(View view) {
-        final String suffix = ".iconBlur.clear";
         try {
             Class<?> cls = Class.forName("com.oplus.view.OplusViewBackgroundRenderEffect", false, loader());
             Method m = cls.getMethod("setBackgroundRenderEffect",
                     android.graphics.RenderEffect.class, View.class);
             m.setAccessible(true);
             m.invoke(null, null, view);
+            SBLog.d("CLEAR", "icon blur cleared via oplus");
             return;
         } catch (Throwable t) {
         }
         try {
             Method m = View.class.getMethod("setRenderEffect", android.graphics.RenderEffect.class);
             m.invoke(view, (Object) null);
+            SBLog.d("CLEAR", "icon blur cleared via View");
         } catch (Throwable t) {
+            SBLog.d("CLEAR", "icon blur clear failed: " + t);
         }
     }
 
     private void clearStaticLayers(View view) {
-        final String T_WALL = ".clearWallpaper";
-        final String T_DRAG = ".clearDragLayer";
         try {
             Class<?> drawableCls = Class.forName("android.graphics.drawable.Drawable", false, loader());
+            boolean wall = false;
+            boolean drag = false;
             try {
                 Method m = view.getClass().getMethod("setWallpaperDrawable", drawableCls);
                 m.setAccessible(true);
                 m.invoke(view, (Object) null);
+                wall = true;
             } catch (Throwable t) {
             }
             try {
                 Method m = view.getClass().getMethod("setDragLayerDrawable", drawableCls);
                 m.setAccessible(true);
                 m.invoke(view, (Object) null);
+                drag = true;
             } catch (Throwable t) {
             }
             try {
@@ -308,7 +331,9 @@ hookOpenCloseAnim(ac, "onCreateCloseAnimation", false);
                 f.setBoolean(view, true);
             } catch (Throwable ignore) {}
             try { invokeNoArgQuietly(view, "invalidate"); } catch (Throwable ignore) {}
+            SBLog.d("CLEAR", "staticLayers wall=" + wall + " drag=" + drag);
         } catch (Throwable t) {
+            SBLog.e("CLEAR", "clearStaticLayers failed", t);
         }
     }
 

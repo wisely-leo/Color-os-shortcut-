@@ -7,17 +7,15 @@ build/
 *.dex
 *.class
 
-# jar：默认忽略，但保留构建必需的 libxposed API
+# jar：默认忽略，但保留构建必需的 jar
 *.jar
-!libs/libxposed-api-102.jar
-
+!libs/*.jar
 # 本地配置
 local.properties
 .idea/
 *.iml
 .DS_Store
 
-# 签名文件（切勿上传！）
-*.jks
-*.keystore
-*.p12
+# 构建工作目录
+tools/**/__pycache__/
+*.pyc
