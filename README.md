@@ -39,9 +39,7 @@
 1. 确保设备已安装 **LSPosed** 框架
 2. 从 [Releases](../../releases) 下载并安装模块 APK
 3. 在 LSPosed 管理器中启用本模块
-4. **作用域**需勾选全部 4 个包：`com.android.launcher`、`com.oplus.launcher`、
-   `com.coloros.launcher`、`com.oplus.blur`（建议在管理器中选择「全选」或一并勾选，
-   漏掉 `com.oplus.blur` 会导致采样率不生效）
+4. **作用域**保持默认（模块已声明，全选即可）
 5. 重启桌面进程或重启手机生效
 
 ## 📦 模块信息
