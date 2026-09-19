@@ -1,14 +1,15 @@
 # Color OS Shortcut Blur
 
-让你的 ColorOS 快捷菜单（快捷方式弹窗）背景模糊换成**更加美观的动态模糊**。
-
-一个 [LSPosed](https://github.com/LSPosed/LSPosed) 模块。
+为 **ColorOS 桌面**提供动态模糊效果的 [LSPosed](https://github.com/LSPosed/LSPosed) 模块。
 
 ---
 
 ## ✨ 功能
 
-- 快捷菜单弹出时，背景以**动态模糊**渐进淡入，替代原生静态模糊
+- **图标模糊**：长按 / 拖拽图标时，按需为图标叠加动态模糊
+- **文件夹模糊**：打开文件夹时，内部图标模糊并带有渐进动画；关闭时平滑还原
+- **壁纸深度模糊**：接入桌面 depth controller，随桌面状态联动，让模糊层次更自然
+- **后处理采样适配**：统一后处理采样率，改善模糊边缘的马赛克 / 颗粒感
 
 ## 📱 支持环境
 
@@ -69,15 +70,20 @@ public static final boolean ENABLED = false;
 /storage/emulated/0/Download/ShortcutBlur.log
 ```
 
+后处理进程的日志会按进程 UID 分流到独立的 `PostEffectBlur.log`。
+
 ## 🧠 实现原理
 
-- Hook 桌面 `OplusPopupContainerWithArrow` 的入场 / 退场动画创建入口
+- Hook 桌面弹窗容器的入场 / 退场动画创建入口
   （`onCreateOpenAnimation` / `onCreateCloseAnimation`），
   把「模糊 0→1 / 1→0」的动画直接 `set.play(...)` 并进原生 `AnimatorSet`，
   与原生 alpha / scale 动画同步。
-- 模糊由 `RenderEffect.createBlurEffect(80f, ...)` 实现：
+- 按视图所处状态分流处理：在文件夹内时走图标模糊路径，其余走壁纸深度模糊路径；
+  判定结果在单次弹窗流程内缓存，流程结束时失效。
+- 模糊由 `RenderEffect.createBlurEffect(64f, ...)` 实现：
   优先调用 `com.oplus.view.OplusViewBackgroundRenderEffect.setBackgroundRenderEffect(effect, view)`，
   失败则回退标准 `View.setRenderEffect(effect)`。
+- 图标模糊动画在收尾与逐帧更新时校验有效性，中途状态变化时立即取消，避免闪回。
 
 ## 📄 许可证
 
