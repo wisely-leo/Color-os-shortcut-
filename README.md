@@ -19,10 +19,18 @@
 | 框架 | LSPosed（libxposed API 102） |
 | 桌面 | **仅 ColorOS / OPPO 系统桌面** |
 
-> 模块作用域仅限 ColorOS 桌面。ColorOS 桌面内部会复用 AOSP launcher3
-> 的能力（类路径），但作用域只声明 ColorOS 桌面包名：
->
-> `com.android.launcher`、`com.oplus.launcher`、`com.coloros.launcher`
+本模块声明 **4 个作用域包**，分两类：
+
+- **桌面进程**：`com.android.launcher`、`com.oplus.launcher`、`com.coloros.launcher`
+  （代码中以 `isTargetLauncher` 统一匹配）。ColorOS 桌面内部复用 AOSP launcher3 的类路径，
+  模块对 `PopupBlurView`、`ArrowPopup`、`OplusPopupContainerWithArrow` 等挂载 Hook，
+  实现图标 / 文件夹 / 壁纸深度模糊。
+- **后处理进程**：`com.oplus.blur`（独立进程，非桌面本身）。模块对类 `e.a` 的
+  `c` / `e` / `d` / `f` 四个方法挂载 Hook，将后处理模糊采样率由系统原生 `0.25`
+  提升至 `0.5`。
+
+> ⚠️ 因此本模块**并非只作用于桌面**：必须同时覆盖 `com.oplus.blur` 进程，
+> 否则后处理采样适配不会生效。
 
 已在 OnePlus / OPPO PLC110（ColorOS 16.1，Android 16 / API 36）实机验证。
 
@@ -31,7 +39,9 @@
 1. 确保设备已安装 **LSPosed** 框架
 2. 从 [Releases](../../releases) 下载并安装模块 APK
 3. 在 LSPosed 管理器中启用本模块
-4. **作用域**勾选 ColorOS 桌面
+4. **作用域**需勾选全部 4 个包：`com.android.launcher`、`com.oplus.launcher`、
+   `com.coloros.launcher`、`com.oplus.blur`（建议在管理器中选择「全选」或一并勾选，
+   漏掉 `com.oplus.blur` 会导致采样率不生效）
 5. 重启桌面进程或重启手机生效
 
 ## 📦 模块信息
