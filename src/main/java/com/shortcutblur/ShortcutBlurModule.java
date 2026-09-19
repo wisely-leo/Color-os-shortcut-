@@ -56,7 +56,7 @@ public class ShortcutBlurModule extends XposedModule {
     private static final long ICON_BLUR_DELAY = 32L;
     private static final long DEPTH_FALLBACK_DELAY = 500L;
 
-    private ClassLoader cl;
+    private volatile ClassLoader cl;
 
     private volatile boolean installed = false;
 
@@ -67,6 +67,7 @@ public class ShortcutBlurModule extends XposedModule {
     private final Map<String, ValueAnimator> iconAnims = new ConcurrentHashMap<>();
     private final Map<String, String> animTargets = new ConcurrentHashMap<>();
     private final Set<String> dumpedCls = new HashSet<>();
+    private final Map<View, Integer> flagsCache = new WeakHashMap<>();
 
     private volatile RenderEffect blurEffect;
 
@@ -168,7 +169,7 @@ public class ShortcutBlurModule extends XposedModule {
                 if (pt.length != 2) continue;
                 if (!"android.view.ViewGroup".equals(pt[0].getName())) continue;
                 if (pt[1] != boolean.class) continue;
-                try { m.setAccessible(true); } catch (Throwable ignore) {}
+                setAccessibleQuietly(m);
                 hook((Executable) m)
                         .setId("iconblur.finish")
                         .setExceptionMode(XposedInterface.ExceptionMode.DEFAULT)
@@ -181,15 +182,11 @@ public class ShortcutBlurModule extends XposedModule {
                                         View v = (View) self;
                                         int flags = flagsFor(v);
                                         SBLog.d("FINISH", "flags=" + flags);
+                                        invalidateFlags(v);
                                         if ((flags & F_WALL) != 0) {
                                             animateDepthBlur(v, 1.0f, 0.0f, BLUR_DURATION);
                                         }
-                                        if ((flags & F_ICON_ANIM) != 0) {
-                                            SBLog.d("ICONANIM", "TEST single-shot clear");
-                                            clearIconBlur(v);
-                                        } else if ((flags & F_ICON) != 0) {
-                                            clearIconBlur(v);
-                                        }
+                                        clearIconBlurByFlags(v, flags, "single-shot clear");
                                     }
                                 } catch (Throwable t) {
                                     SBLog.e("FINISH", "hook body failed", t);
@@ -220,7 +217,7 @@ public class ShortcutBlurModule extends XposedModule {
                         SBLog.d("INSTALL", "skip dup hook " + c.getName() + "." + methodName);
                         continue;
                     }
-                    try { m.setAccessible(true); } catch (Throwable ignore) {}
+                    setAccessibleQuietly(m);
                     hook((Executable) m)
                             .setId("iconblur.opa." + methodName)
                             .setExceptionMode(XposedInterface.ExceptionMode.DEFAULT)
@@ -249,12 +246,8 @@ public class ShortcutBlurModule extends XposedModule {
                                                 }
                                             }
                                             if (!opening) {
-                                                if ((flags & F_ICON_ANIM) != 0) {
-                                                    SBLog.d("ICONANIM", "TEST single-shot clear(anim)");
-                                                    clearIconBlur(anchor);
-                                                } else if ((flags & F_ICON) != 0) {
-                                                    clearIconBlur(anchor);
-                                                }
+                                                invalidateFlags(anchor);
+                                                clearIconBlurByFlags(anchor, flags, "single-shot clear(anim)");
                                             }
                                         }
                                     } catch (Throwable t) {
@@ -277,7 +270,7 @@ public class ShortcutBlurModule extends XposedModule {
         try {
             for (Method m : cls.getDeclaredMethods()) {
                 if (!m.getName().equals(methodName)) continue;
-                try { m.setAccessible(true); } catch (Throwable ignore) {}
+                setAccessibleQuietly(m);
                 final String mid = id + "#" + m.getParameterTypes().length;
                 hook((Executable) m)
                         .setId("hook." + mid)
@@ -304,10 +297,26 @@ public class ShortcutBlurModule extends XposedModule {
         return n;
     }
 
-private int flagsFor(View view) {
-        return isInsideOpenFolder(view)
+    private int flagsFor(View view) {
+        if (view == null) return 0;
+        synchronized (flagsCache) {
+            Integer c = flagsCache.get(view);
+            if (c != null) return c;
+        }
+        int flags = isInsideOpenFolder(view)
                 ? (F_STATIC | F_ICON | F_ICON_ANIM)
                 : (F_STATIC | F_ICON | F_WALL);
+        synchronized (flagsCache) {
+            flagsCache.put(view, flags);
+        }
+        return flags;
+    }
+
+    private void invalidateFlags(View view) {
+        if (view == null) return;
+        synchronized (flagsCache) {
+            flagsCache.remove(view);
+        }
     }
 
     private void makeBlurLive(View view, String mid) {
@@ -325,28 +334,9 @@ private int flagsFor(View view) {
             final View fv = view;
 
             if ((flags & F_ICON_ANIM) != 0) {
-                fv.postDelayed(new Runnable() {
-                    @Override
-                    public void run() {
-                        try {
-                            SBLog.d("ICONANIM", "TEST single-shot apply");
-                            applyIconBlur(fv);
-                        } catch (Throwable t) {
-                            SBLog.e("ICONANIM", "delayed anim failed", t);
-                        }
-                    }
-                }, ICON_BLUR_DELAY);
+                applyIconBlurDelayed(fv, "single-shot apply");
             } else if ((flags & F_ICON) != 0) {
-                fv.postDelayed(new Runnable() {
-                    @Override
-                    public void run() {
-                        try {
-                            applyIconBlur(fv);
-                        } catch (Throwable t) {
-                            SBLog.e("ICONBLUR", "delayed apply failed", t);
-                        }
-                    }
-                }, ICON_BLUR_DELAY);
+                applyIconBlurDelayed(fv, null);
             }
 
             if ((flags & F_WALL) == 0) return;
@@ -496,12 +486,14 @@ private int flagsFor(View view) {
                 @Override
                 public void onAnimationUpdate(ValueAnimator a) {
                     try {
-                        synchronized (iconAnims) {
-                            if (iconAnims.get(key) != va) return;
-                        }
+                        if (!isCurrentAnim(key, va)) return;
                         float r = (Float) a.getAnimatedValue();
                         if (!Float.isNaN(last) && Math.abs(r - last) < 0.5f) return;
                         last = r;
+                        if (!isIconBlurArmed(view)) {
+                            try { va.cancel(); } catch (Throwable ignore) {}
+                            return;
+                        }
                         applyIconBlurRadius(view, r, true);
                     } catch (Throwable t) {
                         SBLog.e("ICONANIM", "update failed", t);
@@ -513,13 +505,18 @@ private int flagsFor(View view) {
             }
             va.start();
             SBLog.d("ICONANIM", "anim " + fromRadius + "->" + toRadius + " dur=" + duration);
+            final boolean[] finished = new boolean[]{false};
             view.postDelayed(new Runnable() {
                 @Override
                 public void run() {
+                    if (finished[0]) return;
+                    finished[0] = true;
                     try {
-                        synchronized (iconAnims) {
-                            if (iconAnims.get(key) != va) return;
-                            iconAnims.remove(key);
+                        if (!isCurrentAnim(key, va)) return;
+                        removeAnim(key);
+                        if (!isIconBlurArmed(view)) {
+                            clearIconBlur(view);
+                            return;
                         }
                         if (toRadius <= 0.01f) {
                             applyIconBlurRadius(view, 0.0f, false);
@@ -567,6 +564,48 @@ private RenderEffect getBlurEffect() {
         return e;
     }
 
+
+    private void clearIconBlurByFlags(View v, int flags, String tag) {
+        if ((flags & F_ICON_ANIM) != 0) {
+            SBLog.d("ICONANIM", "TEST " + tag);
+            clearIconBlur(v);
+        } else if ((flags & F_ICON) != 0) {
+            clearIconBlur(v);
+        }
+    }
+
+    private void applyIconBlurDelayed(final View v, final String tag) {
+        v.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    if (tag != null) SBLog.d("ICONANIM", "TEST " + tag);
+                    applyIconBlur(v);
+                } catch (Throwable t) {
+                    SBLog.e(tag != null ? "ICONANIM" : "ICONBLUR", "delayed apply failed", t);
+                }
+            }
+        }, ICON_BLUR_DELAY);
+    }
+
+    private boolean isCurrentAnim(String key, ValueAnimator va) {
+        synchronized (iconAnims) {
+            return iconAnims.get(key) == va;
+        }
+    }
+
+    private void removeAnim(String key) {
+        synchronized (iconAnims) {
+            iconAnims.remove(key);
+        }
+    }
+
+    private static void setAccessibleQuietly(Executable e) {
+        try {
+            e.setAccessible(true);
+        } catch (Throwable ignore) {
+        }
+    }
 
     private void clearIconBlur(View view) {
 
