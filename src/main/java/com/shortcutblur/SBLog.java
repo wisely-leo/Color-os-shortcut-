@@ -20,6 +20,10 @@ public final class SBLog {
 
     private static final String FILE = "ShortcutBlur.log";
 
+    private static final String FILE_BLUR = "PostEffectBlur.log";
+
+    private static final int UID_BLUR = 10205;
+
     private static File logFile;
 
     private static boolean broken;
@@ -87,11 +91,18 @@ public final class SBLog {
         }
     }
 
+    private static String pickFileName() {
+        try {
+            if (Process.myUid() == UID_BLUR) return FILE_BLUR;
+        } catch (Throwable ignored) {}
+        return FILE;
+    }
+
     private static File open() {
         try {
             File dir = new File(DIR);
             if (!dir.exists()) dir.mkdirs();
-            File f = new File(dir, FILE);
+            File f = new File(dir, pickFileName());
             FileOutputStream fos = new FileOutputStream(f, false);
             fos.write(new byte[0]);
             fos.close();

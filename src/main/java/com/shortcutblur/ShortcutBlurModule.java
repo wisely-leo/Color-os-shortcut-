@@ -1,9 +1,13 @@
 package com.shortcutblur;
 
+import android.animation.ValueAnimator;
 import android.content.Context;
 import android.graphics.RenderEffect;
 import android.graphics.Shader;
 import android.view.View;
+import android.view.ViewGroup;
+import android.view.ViewParent;
+import android.view.animation.DecelerateInterpolator;
 
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Executable;
@@ -34,20 +38,35 @@ public class ShortcutBlurModule extends XposedModule {
     private static final String CLS_ANIMATOR = "android.animation.Animator";
     private static final String CLS_TIME_INTERPOLATOR = "android.animation.TimeInterpolator";
     private static final String CLS_DECELERATE = "android.view.animation.DecelerateInterpolator";
-
     private static final String M_GET_POP_BLUR_VIEW = "getPopBlurView";
 
-    private static final float BLUR_RADIUS = 80.0f;
+    private static final String PKG_POSTEFFECT = "com.oplus.blur";
+    private static final String CLS_EA = "e.a";
+    private static final float SAMPLE_SCALE = 0.5f;
+
+
+    private static final float BLUR_RADIUS = 64.0f;
     private static final long BLUR_DURATION = 330L;
 
-    private static final long ICON_BLUR_DELAY = 120L;
+    private static final int F_STATIC = 1 << 0;
+    private static final int F_ICON = 1 << 1;
+    private static final int F_WALL = 1 << 2;
+    private static final int F_ICON_ANIM = 1 << 3;
+
+    private static final long ICON_BLUR_DELAY = 32L;
     private static final long DEPTH_FALLBACK_DELAY = 500L;
 
     private ClassLoader cl;
 
     private volatile boolean installed = false;
 
+    private volatile boolean postEffectInstalled = false;
+    private final Set<Method> peHooked = new HashSet<>();
+
     private final Map<View, Boolean> armed = new WeakHashMap<>();
+    private final Map<String, ValueAnimator> iconAnims = new ConcurrentHashMap<>();
+    private final Map<String, String> animTargets = new ConcurrentHashMap<>();
+    private final Set<String> dumpedCls = new HashSet<>();
 
     private volatile RenderEffect blurEffect;
 
@@ -66,6 +85,18 @@ public class ShortcutBlurModule extends XposedModule {
             if (param == null) return;
             String pkg = param.getPackageName();
             SBLog.i("onPackageReady pkg=" + pkg);
+            if (PKG_POSTEFFECT.equals(pkg)) {
+                ClassLoader peLoader = param.getClassLoader();
+                if (peLoader == null) return;
+                if (postEffectInstalled) {
+                    SBLog.d("READY", "posteffect already installed, skip");
+                    return;
+                }
+                if (installPostEffectHooks(peLoader)) {
+                    postEffectInstalled = true;
+                }
+                return;
+            }
             if (!isTargetLauncher(pkg)) return;
             ClassLoader loader = param.getClassLoader();
             if (loader == null) return;
@@ -148,8 +179,17 @@ public class ShortcutBlurModule extends XposedModule {
                                 try {
                                     if (self instanceof View) {
                                         View v = (View) self;
-                                        animateDepthBlur(v, 1.0f, 0.0f, BLUR_DURATION);
-                                        clearIconBlur(v);
+                                        int flags = flagsFor(v);
+                                        SBLog.d("FINISH", "flags=" + flags);
+                                        if ((flags & F_WALL) != 0) {
+                                            animateDepthBlur(v, 1.0f, 0.0f, BLUR_DURATION);
+                                        }
+                                        if ((flags & F_ICON_ANIM) != 0) {
+                                            SBLog.d("ICONANIM", "TEST single-shot clear");
+                                            clearIconBlur(v);
+                                        } else if ((flags & F_ICON) != 0) {
+                                            clearIconBlur(v);
+                                        }
                                     }
                                 } catch (Throwable t) {
                                     SBLog.e("FINISH", "hook body failed", t);
@@ -198,14 +238,23 @@ public class ShortcutBlurModule extends XposedModule {
                                             if (anchor == null && self instanceof View) anchor = (View) self;
                                         }
                                         if (anchor != null && set != null) {
-                                            float from = opening ? 0.0f : 1.0f;
-                                            float to = opening ? 1.0f : 0.0f;
-                                            Object anim = newDepthBlurAnim(anchor, from, to, BLUR_DURATION);
-                                            if (anim != null) {
-                                                animatorSetPlay(set, anim);
+                                            int flags = flagsFor(anchor);
+                                            SBLog.d("ANIM", methodName + " flags=" + flags);
+                                            if ((flags & F_WALL) != 0) {
+                                                float from = opening ? 0.0f : 1.0f;
+                                                float to = opening ? 1.0f : 0.0f;
+                                                Object anim = newDepthBlurAnim(anchor, from, to, BLUR_DURATION);
+                                                if (anim != null) {
+                                                    animatorSetPlay(set, anim);
+                                                }
                                             }
                                             if (!opening) {
-                                                clearIconBlur(anchor);
+                                                if ((flags & F_ICON_ANIM) != 0) {
+                                                    SBLog.d("ICONANIM", "TEST single-shot clear(anim)");
+                                                    clearIconBlur(anchor);
+                                                } else if ((flags & F_ICON) != 0) {
+                                                    clearIconBlur(anchor);
+                                                }
                                             }
                                         }
                                     } catch (Throwable t) {
@@ -255,29 +304,52 @@ public class ShortcutBlurModule extends XposedModule {
         return n;
     }
 
+private int flagsFor(View view) {
+        return isInsideOpenFolder(view)
+                ? (F_STATIC | F_ICON | F_ICON_ANIM)
+                : (F_STATIC | F_ICON | F_WALL);
+    }
+
     private void makeBlurLive(View view, String mid) {
         if (view == null) return;
         try {
             SBLog.d("LIVE", "makeBlurLive id=" + mid);
+            final int flags = flagsFor(view);
+            SBLog.d("LIVE", "flags=" + flags + " (static=" + ((flags & F_STATIC) != 0)
+                    + " icon=" + ((flags & F_ICON) != 0) + " wall=" + ((flags & F_WALL) != 0) + ")");
 
             armIconBlur(view, true);
-            clearStaticLayers(view);
+
+            if ((flags & F_STATIC) != 0) clearStaticLayers(view);
 
             final View fv = view;
 
-            fv.postDelayed(new Runnable() {
-                @Override
-                public void run() {
-                    try {
-                        applyIconBlur(fv);
-                    } catch (Throwable t) {
-                        SBLog.e("ICONBLUR", "delayed apply failed", t);
+            if ((flags & F_ICON_ANIM) != 0) {
+                fv.postDelayed(new Runnable() {
+                    @Override
+                    public void run() {
+                        try {
+                            SBLog.d("ICONANIM", "TEST single-shot apply");
+                            applyIconBlur(fv);
+                        } catch (Throwable t) {
+                            SBLog.e("ICONANIM", "delayed anim failed", t);
+                        }
                     }
-                }
-            }, ICON_BLUR_DELAY);
+                }, ICON_BLUR_DELAY);
+            } else if ((flags & F_ICON) != 0) {
+                fv.postDelayed(new Runnable() {
+                    @Override
+                    public void run() {
+                        try {
+                            applyIconBlur(fv);
+                        } catch (Throwable t) {
+                            SBLog.e("ICONBLUR", "delayed apply failed", t);
+                        }
+                    }
+                }, ICON_BLUR_DELAY);
+            }
 
-            setDepthBlur(view, 0.0f);
-
+            if ((flags & F_WALL) == 0) return;
             fv.postDelayed(new Runnable() {
                 @Override
                 public void run() {
@@ -304,25 +376,80 @@ public class ShortcutBlurModule extends XposedModule {
                     }
                 }
             }, DEPTH_FALLBACK_DELAY);
-
         } catch (Throwable t) {
             SBLog.e("LIVE", "makeBlurLive failed", t);
         }
     }
 
     private void applyIconBlur(View view) {
-
         if (!isIconBlurArmed(view)) {
             SBLog.d("ICONBLUR", "skipped: disarmed");
             return;
         }
+        applyIconBlurRadius(view, BLUR_RADIUS);
+    }
+
+    private void applyIconBlurRadius(View view, float radius) {
+        applyIconBlurRadius(view, radius, true);
+    }
+
+    private void dumpOplusOnce(Class<?> cls) {
+        String key = cls.getName();
+        synchronized (dumpedCls) {
+            if (!dumpedCls.add(key)) return;
+        }
         try {
-            RenderEffect effect = getBlurEffect();
+            StringBuilder sb = new StringBuilder();
+            for (Method m : cls.getDeclaredMethods()) {
+                sb.append(m.getName()).append('(');
+                Class<?>[] ps = m.getParameterTypes();
+                for (int i = 0; i < ps.length; i++) {
+                    if (i > 0) sb.append(',');
+                    sb.append(ps[i].getSimpleName());
+                }
+                sb.append(")->").append(m.getReturnType().getSimpleName()).append(" | ");
+            }
+            SBLog.d("OPLUSDUMP", sb.toString());
+            for (Field f : cls.getDeclaredFields()) {
+                try {
+                    f.setAccessible(true);
+                    Object val = java.lang.reflect.Modifier.isStatic(f.getModifiers()) ? f.get(null) : null;
+                    SBLog.d("OPLUSDUMP", "FIELD " + f.getName() + " type=" + f.getType().getSimpleName() + " val=" + val);
+                } catch (Throwable ig) {}
+            }
+            for (Class<?> c = cls.getSuperclass(); c != null && c != Object.class; c = c.getSuperclass()) {
+                StringBuilder s2 = new StringBuilder("SUPER " + c.getName() + ": ");
+                for (Method m : c.getDeclaredMethods()) {
+                    s2.append(m.getName()).append('(');
+                    Class<?>[] ps = m.getParameterTypes();
+                    for (int i = 0; i < ps.length; i++) {
+                        if (i > 0) s2.append(',');
+                        s2.append(ps[i].getSimpleName());
+                    }
+                    s2.append(") | ");
+                }
+                SBLog.d("OPLUSDUMP", s2.toString());
+            }
+        } catch (Throwable t) {
+            SBLog.e("OPLUSDUMP", "dump failed", t);
+        }
+    }
+
+    private void applyIconBlurRadius(View view, float radius, boolean useOplus) {
+        if (view == null) return;
+        try {
+            RenderEffect effect = RenderEffect.createBlurEffect(radius, radius, Shader.TileMode.MIRROR);
+
+            if (!useOplus) {
+                tryViewSetRenderEffect(view, effect);
+                return;
+            }
 
             boolean oplusOk = false;
             try {
                 Class<?> cls = forName(CLS_OPLUS_EFFECT, loader());
                 if (cls != null) {
+                    dumpOplusOnce(cls);
                     Method m = getMethodCached(cls, "setBackgroundRenderEffect", RenderEffect.class, View.class);
                     if (m != null) {
                         m.invoke(null, effect, view);
@@ -334,13 +461,83 @@ public class ShortcutBlurModule extends XposedModule {
             }
 
             if (!oplusOk) {
-                String err = tryViewSetRenderEffect(view);
+                String err = tryViewSetRenderEffect(view, effect);
                 SBLog.d("ICONBLUR", "fallback setRenderEffect err=" + err);
-            } else {
-                SBLog.d("ICONBLUR", "oplus path ok");
             }
         } catch (Throwable t) {
-            SBLog.e("ICONBLUR", "applyIconBlur failed", t);
+            SBLog.e("ICONBLUR", "applyIconBlurRadius failed", t);
+        }
+    }
+
+    private void animateIconBlur(final View view, final float fromRadius, final float toRadius, long duration) {
+        if (view == null) return;
+        try {
+            final String key = System.identityHashCode(view) + "";
+            synchronized (iconAnims) {
+                ValueAnimator old = iconAnims.remove(key);
+                if (old != null) {
+                    try { old.cancel(); } catch (Throwable ignore) {}
+                }
+            }
+            final String targetKey = "t_" + System.identityHashCode(view);
+            String nowTarget = toRadius <= 0.01f ? "0" : "64";
+            String prevTarget = animTargets.get(targetKey);
+            if (prevTarget != null && prevTarget.equals(nowTarget)) {
+                SBLog.d("ICONANIM", "skip dup " + prevTarget);
+                return;
+            }
+            animTargets.put(targetKey, nowTarget);
+            final ValueAnimator va = ValueAnimator.ofFloat(fromRadius, toRadius);
+            va.setDuration(duration);
+            va.setInterpolator(new DecelerateInterpolator());
+            va.addUpdateListener(new ValueAnimator.AnimatorUpdateListener() {
+                private float last = Float.NaN;
+
+                @Override
+                public void onAnimationUpdate(ValueAnimator a) {
+                    try {
+                        synchronized (iconAnims) {
+                            if (iconAnims.get(key) != va) return;
+                        }
+                        float r = (Float) a.getAnimatedValue();
+                        if (!Float.isNaN(last) && Math.abs(r - last) < 0.5f) return;
+                        last = r;
+                        applyIconBlurRadius(view, r, true);
+                    } catch (Throwable t) {
+                        SBLog.e("ICONANIM", "update failed", t);
+                    }
+                }
+            });
+            synchronized (iconAnims) {
+                iconAnims.put(key, va);
+            }
+            va.start();
+            SBLog.d("ICONANIM", "anim " + fromRadius + "->" + toRadius + " dur=" + duration);
+            view.postDelayed(new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        synchronized (iconAnims) {
+                            if (iconAnims.get(key) != va) return;
+                            iconAnims.remove(key);
+                        }
+                        if (toRadius <= 0.01f) {
+                            applyIconBlurRadius(view, 0.0f, false);
+                            clearIconBlur(view);
+                        } else {
+                            applyIconBlurRadius(view, toRadius, true);
+                        }
+                    } catch (Throwable t) {
+                        SBLog.e("ICONANIM", "finalize failed", t);
+                    }
+                }
+            }, duration + 16L);
+        } catch (Throwable t) {
+            SBLog.e("ICONANIM", "animateIconBlur failed", t);
+            try {
+                if (toRadius <= 0.01f) clearIconBlur(view);
+                else applyIconBlurRadius(view, toRadius, true);
+            } catch (Throwable ignore) {}
         }
     }
 
@@ -361,8 +558,7 @@ public class ShortcutBlurModule extends XposedModule {
             return armed.containsKey(view);
         }
     }
-
-    private RenderEffect getBlurEffect() {
+private RenderEffect getBlurEffect() {
         RenderEffect e = blurEffect;
         if (e == null) {
             e = RenderEffect.createBlurEffect(BLUR_RADIUS, BLUR_RADIUS, Shader.TileMode.MIRROR);
@@ -370,6 +566,7 @@ public class ShortcutBlurModule extends XposedModule {
         }
         return e;
     }
+
 
     private void clearIconBlur(View view) {
 
@@ -426,11 +623,11 @@ public class ShortcutBlurModule extends XposedModule {
         }
     }
 
-    private String tryViewSetRenderEffect(View view) {
+    private String tryViewSetRenderEffect(View view, RenderEffect effect) {
         try {
             Method m = getMethodCached(View.class, "setRenderEffect", RenderEffect.class);
             if (m == null) return "setRenderEffect not found";
-            m.invoke(view, getBlurEffect());
+            m.invoke(view, effect);
             return null;
         } catch (Throwable t) {
             return String.valueOf(t);
@@ -655,6 +852,164 @@ public class ShortcutBlurModule extends XposedModule {
         } catch (Throwable t) {
             return null;
         }
+    }
+
+    private boolean installPostEffectHooks(ClassLoader loader) {
+        Class<?> cls;
+        try {
+            cls = Class.forName(CLS_EA, false, loader);
+        } catch (Throwable t) {
+            SBLog.e("INSTALL", "class not found: " + CLS_EA, t);
+            return false;
+        }
+        SBLog.i("INSTALL class loaded: " + cls.getName());
+        int critical = 0;
+        critical += hookBySig(cls, "c",
+                new String[]{ "android.view.SurfaceControl", "java.lang.Float", "java.lang.Integer", "java.lang.Long" },
+                "c");
+        critical += hookBySig(cls, "e",
+                new String[]{ "android.view.SurfaceControl", "java.lang.Float", "java.lang.Integer", "java.lang.Long" },
+                "e");
+        critical += hookBySig(cls, "d",
+                new String[]{ "android.view.SurfaceControl", "float", "int", "long" },
+                "d");
+        critical += hookBySig(cls, "f",
+                new String[]{ "float", "int", "long" },
+                "f");
+        SBLog.i("READY posteffect installed critical=" + critical);
+        return critical > 0;
+    }
+
+    private int hookBySig(Class<?> cls, String methodName, String[] wantParams, String tag) {
+        Method target = null;
+        StringBuilder all = new StringBuilder();
+        for (Method m : cls.getDeclaredMethods()) {
+            all.append(m.getName()).append("(");
+            Class<?>[] ps = m.getParameterTypes();
+            for (int i = 0; i < ps.length; i++) {
+                if (i > 0) all.append(",");
+                all.append(ps[i].getName());
+            }
+            all.append(") ");
+            if (!m.getName().equals(methodName)) continue;
+            if (ps.length != wantParams.length) continue;
+            boolean ok = true;
+            for (int i = 0; i < ps.length; i++) {
+                if (!ps[i].getName().equals(wantParams[i])) { ok = false; break; }
+            }
+            if (ok) { target = m; break; }
+        }
+        if (target == null) {
+            SBLog.e("INSTALL", "method not found: " + methodName + " | declared: " + all, null);
+            return 0;
+        }
+        final Method m = target;
+        final Class<?>[] paramTypes = m.getParameterTypes();
+        try {
+            m.setAccessible(true);
+            if (!peHooked.add(m)) {
+                SBLog.d("INSTALL", "skip dup hook " + cls.getName() + "." + methodName);
+                return 0;
+            }
+            this.hook(m)
+                    .setPriority(XposedInterface.PRIORITY_DEFAULT)
+                    .intercept(chain -> {
+                        Object[] args = chain.getArgs().toArray();
+                        int pos = findFloatIndex(paramTypes);
+                        if (pos >= 0 && pos < args.length && args[pos] instanceof Number) {
+                            float old = ((Number) args[pos]).floatValue();
+                            if (old != SAMPLE_SCALE) {
+                                args[pos] = SAMPLE_SCALE;
+                                SBLog.d("SCALE", tag + " " + old + " -> " + SAMPLE_SCALE);
+                            } else {
+                                SBLog.d("SCALE", tag + " keep " + old);
+                            }
+                        } else {
+                            SBLog.d("SCALE", tag + " no float arg (pos=" + pos + ")");
+                        }
+                        return chain.proceed(args);
+                    });
+            SBLog.i("INSTALL hooked " + cls.getName() + "." + methodName + " (" + tag + ")");
+            return 1;
+        } catch (Throwable t) {
+            SBLog.e("INSTALL", "hook failed: " + cls.getName() + "." + methodName, t);
+            return 0;
+        }
+    }
+
+    private int findFloatIndex(Class<?>[] types) {
+        int idx = -1;
+        for (int i = 0; i < types.length; i++) {
+            Class<?> t = types[i];
+            if (t == float.class || t == Float.class) {
+                idx = i;
+            }
+        }
+        return idx;
+    }
+
+    private boolean isInsideOpenFolder(View view) {
+        try {
+            ViewGroup dragLayer = findDragLayer(view);
+            if (dragLayer == null) {
+                SBLog.d("FOLDER", "no dragLayer found, chain=" + chainNames(view));
+                return false;
+            }
+            for (int i = 0; i < dragLayer.getChildCount(); i++) {
+                View c = dragLayer.getChildAt(i);
+                String cn = c.getClass().getName();
+                if (cn.contains("Workspace")) {
+                    float a = c.getAlpha();
+                    int vis = c.getVisibility();
+                    boolean inFolder = (a < 0.9f) || (vis != View.VISIBLE);
+                    SBLog.d("FOLDER", "workspace vis=" + vis + " alpha=" + a + " -> inFolder=" + inFolder);
+                    return inFolder;
+                }
+            }
+            SBLog.d("FOLDER", "no workspace child, dragLayer children=" + childNames(dragLayer));
+            return false;
+        } catch (Throwable t) {
+            SBLog.e("FOLDER", "isInsideOpenFolder failed", t);
+            return false;
+        }
+    }
+
+    private ViewGroup findDragLayer(View view) {
+        ViewParent p = view.getParent();
+        int guard = 0;
+        while (p != null && guard < 50) {
+            if (p instanceof ViewGroup) {
+                String cn = p.getClass().getName();
+                if (cn.contains("DragLayer")) return (ViewGroup) p;
+            }
+            p = (p instanceof View) ? ((View) p).getParent() : null;
+            guard++;
+        }
+        return null;
+    }
+
+    private String chainNames(View view) {
+        StringBuilder sb = new StringBuilder();
+        try {
+            ViewParent p = view.getParent();
+            int g = 0;
+            while (p != null && g < 20) {
+                sb.append(p.getClass().getSimpleName()).append(" > ");
+                p = (p instanceof View) ? ((View) p).getParent() : null;
+                g++;
+            }
+        } catch (Throwable ignored) {}
+        return sb.toString();
+    }
+
+    private String childNames(ViewGroup vg) {
+        StringBuilder sb = new StringBuilder();
+        try {
+            for (int i = 0; i < vg.getChildCount(); i++) {
+                sb.append(vg.getChildAt(i).getClass().getSimpleName()).append(" ");
+            }
+        } catch (Throwable ignored) {}
+        return sb.toString();
     }
 
     private ClassLoader loader() {
